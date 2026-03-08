@@ -19,7 +19,7 @@ namespace LoginApi.Controllers
         [HttpPost("login")]
         public async Task<IActionResult> Login([FromBody] LoginRequest request)
         {
-            Console.WriteLine($"Correo recibido: '{request.correo}'");
+            Console.WriteLine($"Correo recibido: '{request.corrro}'");
             Console.WriteLine($"Pass recibido: '{request.pass}'");
 
             var cliente = await _context.Cliente
