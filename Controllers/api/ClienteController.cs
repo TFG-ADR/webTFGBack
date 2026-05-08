@@ -12,7 +12,7 @@ namespace webTFGBack.Controllers
         private readonly AppDbContext _context;
         public ClienteController(AppDbContext context) => _context = context;
 
-        // GET api/cliente/{id}  — perfil completo para el modal
+        // GET api/cliente/{id}  — perfil completo para el modal (USADO POR LA WEB)
         [HttpGet("{id}")]
         public async Task<IActionResult> GetById(int id)
         {
@@ -187,6 +187,93 @@ namespace webTFGBack.Controllers
             await _context.SaveChangesAsync();
             return Ok(new { message = "Suscripción renovada correctamente" });
         }
+
+        // =====================================================================
+        // === NUEVO PARA APP MÓVIL =============================================
+        // GET /api/cliente/perfil/{id}
+        // Devuelve datos personales del cliente + ÚNICA suscripción activa
+        // (objeto, no lista) en el formato exacto que espera la app Android
+        // (modelos PerfilResponse.java y SuscripcionActiva.java).
+        //
+        // No colisiona con GET /api/cliente/{id} porque la ruta literal
+        // "perfil" se resuelve antes que el parámetro {id} en el routing.
+        // =====================================================================
+        [HttpGet("perfil/{id}")]
+        public async Task<IActionResult> GetPerfilApp(int id)
+        {
+            var cliente = await _context.Cliente
+                .Include(c => c.Persona)
+                .Include(c => c.Suscripciones).ThenInclude(s => s.Plan)
+                .FirstOrDefaultAsync(c => c.id_cliente == id);
+
+            if (cliente == null)
+                return NotFound(new { message = "Cliente no encontrado" });
+
+            var hoy = DateOnly.FromDateTime(DateTime.Today);
+
+            // Suscripción activa: estado=activa y fecha_fin>=hoy, la más reciente
+            var sus = cliente.Suscripciones
+                .Where(s => s.estado == "activa" && s.fecha_fin >= hoy)
+                .OrderByDescending(s => s.fecha_fin)
+                .FirstOrDefault();
+
+            object? suscripcionActiva = null;
+            if (sus != null)
+            {
+                suscripcionActiva = new
+                {
+                    id_suscripcion    = sus.id_suscripcion,
+                    plan_nombre       = sus.Plan!.nombre,
+                    plan_tipo         = sus.Plan!.tipo,
+                    precio            = sus.Plan!.precio,
+                    fecha_inicio      = sus.fecha_inicio.ToString("dd/MM/yyyy"),
+                    fecha_fin         = sus.fecha_fin.ToString("dd/MM/yyyy"),
+                    accesos_restantes = sus.accesos_restantes,
+                    estado            = sus.estado
+                };
+            }
+
+            return Ok(new
+            {
+                id_cliente = cliente.id_cliente,
+                nombre     = cliente.Persona!.nombre,
+                email      = cliente.Persona!.email,
+                telefono   = cliente.Persona!.telefono,
+                documento  = cliente.Persona!.documento_identidad,
+                suscripcion_activa = suscripcionActiva
+            });
+        }
+
+        // =====================================================================
+        // === NUEVO PARA APP MÓVIL =============================================
+        // GET /api/cliente/{id}/entradas
+        // Historial de las últimas 20 entradas al gimnasio del cliente.
+        // Formato exacto que espera la app (modelo EntradaItem.java).
+        // =====================================================================
+        [HttpGet("{id}/entradas")]
+        public async Task<IActionResult> GetEntradasApp(int id)
+        {
+            var cliente = await _context.Cliente.FindAsync(id);
+            if (cliente == null)
+                return NotFound(new { message = "Cliente no encontrado" });
+
+            var entradas = await _context.RegistroEntrada
+                .Where(r => r.id_persona == cliente.id_persona)
+                .OrderByDescending(r => r.fecha_hora_entrada)
+                .Take(20)
+                .Select(r => new
+                {
+                    id_registro        = r.id_registro,
+                    fecha_hora_entrada = r.fecha_hora_entrada.ToString("dd/MM/yyyy HH:mm"),
+                    fecha_hora_salida  = r.fecha_hora_salida.HasValue
+                                         ? r.fecha_hora_salida.Value.ToString("dd/MM/yyyy HH:mm")
+                                         : null
+                })
+                .ToListAsync();
+
+            return Ok(entradas);
+        }
+        // === FIN AÑADIDOS PARA APP MÓVIL =====================================
     }
 
     public class CrearClienteRequest
