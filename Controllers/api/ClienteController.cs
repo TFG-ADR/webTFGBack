@@ -96,6 +96,102 @@ namespace webTFGBack.Controllers
             return Ok(resultados);
         }
 
+        // GET api/cliente/gym/{id_gym}
+        // Lista completa de clientes de la compañía del gym, con su estado
+        [HttpGet("gym/{id_gym}")]
+        public async Task<IActionResult> GetByGym(
+            int id_gym,
+            [FromQuery] string? filtro,      // "activos" | "inactivos" | null = todos
+            [FromQuery] string? q,           // búsqueda por nombre/documento
+            [FromQuery] int pagina = 1,
+            [FromQuery] int tamano = 20)
+        {
+            var gym = await _context.Gym.FindAsync(id_gym);
+            if (gym == null)
+                return NotFound(new { message = "Gimnasio no encontrado" });
+
+            var hoy = DateOnly.FromDateTime(DateTime.Today);
+
+            var query = _context.Cliente
+                .Include(c => c.Persona)
+                .Include(c => c.Suscripciones).ThenInclude(s => s.Plan)
+                .Where(c => c.Suscripciones.Any(s => s.Plan!.id_compania == gym.id_compania)
+                         || !c.Suscripciones.Any()) // incluye clientes sin suscripción de la compañía
+                .AsQueryable();
+
+            // Filtro por nombre o documento
+            if (!string.IsNullOrWhiteSpace(q))
+                query = query.Where(c =>
+                    c.Persona!.nombre.Contains(q) ||
+                    c.Persona!.documento_identidad.Contains(q));
+
+            var todos = await query
+                .OrderBy(c => c.Persona!.nombre)
+                .Select(c => new
+                {
+                    id_cliente = c.id_cliente,
+                    nombre = c.Persona!.nombre,
+                    documento = c.Persona!.documento_identidad,
+                    email = c.Persona!.email,
+                    telefono = c.Persona!.telefono,
+                    plan_activo = c.Suscripciones
+                        .Where(s => s.estado == "activa" && s.fecha_fin >= hoy)
+                        .OrderByDescending(s => s.fecha_fin)
+                        .Select(s => s.Plan!.nombre)
+                        .FirstOrDefault(),
+                    fecha_fin = c.Suscripciones
+                        .Where(s => s.estado == "activa" && s.fecha_fin >= hoy)
+                        .OrderByDescending(s => s.fecha_fin)
+                        .Select(s => (DateOnly?)s.fecha_fin)
+                        .FirstOrDefault(),
+                    dias_restantes = c.Suscripciones
+                        .Where(s => s.estado == "activa" && s.fecha_fin >= hoy)
+                        .OrderByDescending(s => s.fecha_fin)
+                        .Select(s => (int?)(s.fecha_fin.DayNumber - hoy.DayNumber))
+                        .FirstOrDefault(),
+                    tiene_activa = c.Suscripciones
+                        .Any(s => s.estado == "activa" && s.fecha_fin >= hoy)
+                })
+                .ToListAsync();
+
+            // Aplicar filtro activos/inactivos
+            var filtrados = filtro switch
+            {
+                "activos" => todos.Where(c => c.tiene_activa).ToList(),
+                "inactivos" => todos.Where(c => !c.tiene_activa).ToList(),
+                _ => todos
+            };
+
+            var total = filtrados.Count;
+            var pagados = filtrados
+                .Skip((pagina - 1) * tamano)
+                .Take(tamano)
+                .Select(c => new
+                {
+                    c.id_cliente,
+                    c.nombre,
+                    c.documento,
+                    c.email,
+                    c.telefono,
+                    c.plan_activo,
+                    c.tiene_activa,
+                    c.dias_restantes,
+                    fecha_fin = c.fecha_fin?.ToString("dd/MM/yyyy"),
+                    // aviso si vence en <=7 días
+                    vence_pronto = c.tiene_activa && c.dias_restantes.HasValue && c.dias_restantes <= 7
+                })
+                .ToList();
+
+            return Ok(new
+            {
+                total,
+                pagina,
+                tamano,
+                paginas = (int)Math.Ceiling((double)total / tamano),
+                clientes = pagados
+            });
+        }
+
         // POST api/cliente
         [HttpPost]
         public async Task<IActionResult> Crear([FromBody] CrearClienteRequest req)
@@ -188,16 +284,7 @@ namespace webTFGBack.Controllers
             return Ok(new { message = "Suscripción renovada correctamente" });
         }
 
-        // =====================================================================
-        // === NUEVO PARA APP MÓVIL =============================================
-        // GET /api/cliente/perfil/{id}
-        // Devuelve datos personales del cliente + ÚNICA suscripción activa
-        // (objeto, no lista) en el formato exacto que espera la app Android
-        // (modelos PerfilResponse.java y SuscripcionActiva.java).
-        //
-        // No colisiona con GET /api/cliente/{id} porque la ruta literal
-        // "perfil" se resuelve antes que el parámetro {id} en el routing.
-        // =====================================================================
+        // GET /api/cliente/perfil/{id}  (app móvil)
         [HttpGet("perfil/{id}")]
         public async Task<IActionResult> GetPerfilApp(int id)
         {
@@ -210,8 +297,6 @@ namespace webTFGBack.Controllers
                 return NotFound(new { message = "Cliente no encontrado" });
 
             var hoy = DateOnly.FromDateTime(DateTime.Today);
-
-            // Suscripción activa: estado=activa y fecha_fin>=hoy, la más reciente
             var sus = cliente.Suscripciones
                 .Where(s => s.estado == "activa" && s.fecha_fin >= hoy)
                 .OrderByDescending(s => s.fecha_fin)
@@ -219,37 +304,30 @@ namespace webTFGBack.Controllers
 
             object? suscripcionActiva = null;
             if (sus != null)
-            {
                 suscripcionActiva = new
                 {
-                    id_suscripcion    = sus.id_suscripcion,
-                    plan_nombre       = sus.Plan!.nombre,
-                    plan_tipo         = sus.Plan!.tipo,
-                    precio            = sus.Plan!.precio,
-                    fecha_inicio      = sus.fecha_inicio.ToString("dd/MM/yyyy"),
-                    fecha_fin         = sus.fecha_fin.ToString("dd/MM/yyyy"),
+                    id_suscripcion = sus.id_suscripcion,
+                    plan_nombre = sus.Plan!.nombre,
+                    plan_tipo = sus.Plan!.tipo,
+                    precio = sus.Plan!.precio,
+                    fecha_inicio = sus.fecha_inicio.ToString("dd/MM/yyyy"),
+                    fecha_fin = sus.fecha_fin.ToString("dd/MM/yyyy"),
                     accesos_restantes = sus.accesos_restantes,
-                    estado            = sus.estado
+                    estado = sus.estado
                 };
-            }
 
             return Ok(new
             {
                 id_cliente = cliente.id_cliente,
-                nombre     = cliente.Persona!.nombre,
-                email      = cliente.Persona!.email,
-                telefono   = cliente.Persona!.telefono,
-                documento  = cliente.Persona!.documento_identidad,
+                nombre = cliente.Persona!.nombre,
+                email = cliente.Persona!.email,
+                telefono = cliente.Persona!.telefono,
+                documento = cliente.Persona!.documento_identidad,
                 suscripcion_activa = suscripcionActiva
             });
         }
 
-        // =====================================================================
-        // === NUEVO PARA APP MÓVIL =============================================
-        // GET /api/cliente/{id}/entradas
-        // Historial de las últimas 20 entradas al gimnasio del cliente.
-        // Formato exacto que espera la app (modelo EntradaItem.java).
-        // =====================================================================
+        // GET /api/cliente/{id}/entradas  (app móvil)
         [HttpGet("{id}/entradas")]
         public async Task<IActionResult> GetEntradasApp(int id)
         {
@@ -263,9 +341,9 @@ namespace webTFGBack.Controllers
                 .Take(20)
                 .Select(r => new
                 {
-                    id_registro        = r.id_registro,
+                    id_registro = r.id_registro,
                     fecha_hora_entrada = r.fecha_hora_entrada.ToString("dd/MM/yyyy HH:mm"),
-                    fecha_hora_salida  = r.fecha_hora_salida.HasValue
+                    fecha_hora_salida = r.fecha_hora_salida.HasValue
                                          ? r.fecha_hora_salida.Value.ToString("dd/MM/yyyy HH:mm")
                                          : null
                 })
@@ -273,7 +351,6 @@ namespace webTFGBack.Controllers
 
             return Ok(entradas);
         }
-        // === FIN AÑADIDOS PARA APP MÓVIL =====================================
     }
 
     public class CrearClienteRequest
